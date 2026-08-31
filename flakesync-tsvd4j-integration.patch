@@ -1,0 +1,736 @@
+diff --git a/flakesync-core/src/main/java/edu/utexas/ece/flakesync/agent/Agent.java b/flakesync-core/src/main/java/edu/utexas/ece/flakesync/agent/Agent.java
+index 6674719..79cd13f 100755
+--- a/flakesync-core/src/main/java/edu/utexas/ece/flakesync/agent/Agent.java
++++ b/flakesync-core/src/main/java/edu/utexas/ece/flakesync/agent/Agent.java
+@@ -51,6 +51,7 @@ import java.security.ProtectionDomain;
+ import java.util.ArrayList;
+ import java.util.HashSet;
+ import java.util.List;
++import java.util.Map;
+ import java.util.Set;
+ 
+ public class Agent {
+@@ -252,6 +253,12 @@ public class Agent {
+                                 }
+                             }
+ 
++                            return writer.toByteArray();
++                        }
++                    } else if (mode.equals("TSV_DETECTION")) {
++                        if (TsvScope.inScope(className)) {
++                            visitor = new edu.utexas.ece.tsvd4j.agent.ClassTracer(writer);
++                            reader.accept(visitor, 0);
+                             return writer.toByteArray();
+                         }
+                     // These modes rely on white list
+@@ -375,6 +382,8 @@ public class Agent {
+                         } catch (IOException ioe) {
+                             ioe.printStackTrace();
+                         }
++                    } else if (mode.equals("TSV_DETECTION")) {
++                        writeTsvResults();
+                     }
+                 } catch (IOException ioe) {
+                     ioe.printStackTrace();
+@@ -394,4 +403,58 @@ public class Agent {
+         };
+         Runtime.getRuntime().addShutdownHook(hook);
+     }
++
++    /**
++     * Dumps the conflicting interception-point pairs found by TSVD4J, one file per
++     * run so that repeated randomized runs can be unioned afterwards.
++     */
++    private static void writeTsvResults() {
++        String test = System.getProperty(".test", "unknown").replace("#", ".");
++        String runId = System.getProperty("tsvRunId", "0");
++        Path outDir = Paths.get(".", Constants.DEFAULT_FLAKESYNC_DIR, "Results-TSV");
++        outDir.toFile().mkdirs();
++        Path out = outDir.resolve(test + "-TSV-run" + runId + ".csv");
++
++        BufferedWriter bf = null;
++        try {
++            bf = new BufferedWriter(new FileWriter(out.toFile()));
++            bf.write("#run=" + runId);
++            bf.newLine();
++            bf.write("#scopeSize=" + TsvScope.getScopeSize());
++            bf.newLine();
++            bf.write("#classesInstrumented=" + TsvScope.getInstrumentedCount());
++            bf.newLine();
++            bf.write("#classesConsidered=" + TsvScope.getConsideredCount());
++            bf.newLine();
++            bf.write("pointA,pointB");
++            bf.newLine();
++
++            Set<String> seen = new HashSet<>();
++            Map<edu.utexas.ece.tsvd4j.agent.InterceptionPoint,
++                edu.utexas.ece.tsvd4j.agent.InterceptionPoint> pairs =
++                    edu.utexas.ece.tsvd4j.agent.Utility.resultInterception;
++            synchronized (pairs) {
++                for (Map.Entry<edu.utexas.ece.tsvd4j.agent.InterceptionPoint,
++                        edu.utexas.ece.tsvd4j.agent.InterceptionPoint> e : pairs.entrySet()) {
++                    String pair = e.getKey() + "," + e.getValue();
++                    if (seen.add(pair)) {
++                        bf.write(pair);
++                        bf.newLine();
++                    }
++                }
++            }
++            bf.flush();
++            System.out.println("[tsvd4j] " + seen.size() + " conflicting pairs -> " + out);
++        } catch (Exception ex) {
++            ex.printStackTrace();
++        } finally {
++            if (bf != null) {
++                try {
++                    bf.close();
++                } catch (Exception ignored) {
++                    // Nothing useful to do here.
++                }
++            }
++        }
++    }
+ }
+diff --git a/flakesync-core/src/main/java/edu/utexas/ece/flakesync/agent/TsvScope.java b/flakesync-core/src/main/java/edu/utexas/ece/flakesync/agent/TsvScope.java
+new file mode 100644
+index 0000000..962be00
+--- /dev/null
++++ b/flakesync-core/src/main/java/edu/utexas/ece/flakesync/agent/TsvScope.java
+@@ -0,0 +1,137 @@
++package edu.utexas.ece.flakesync.agent;
++
++import java.io.BufferedReader;
++import java.io.File;
++import java.io.FileReader;
++import java.util.Collections;
++import java.util.HashSet;
++import java.util.Set;
++import java.util.concurrent.atomic.AtomicInteger;
++
++/**
++ * Restricts TSVD4J instrumentation to the classes FlakeSync localized.
++ *
++ * <p>The scope file is passed via -DtsvScope and may be any of FlakeSync's
++ * location artifacts; the parser is deliberately permissive:
++ *   Locations_minimized.txt   ->  org/foo/Bar#42
++ *   CriticalPoints.csv        ->  testName,org.foo.Bar#42[800]
++ *   BarrierPoints.csv         ->  testName,org.foo.Bar#doWork#42
++ *   ResultMethods.txt         ->  org.foo.Bar#doWork
++ *
++ * <p>If -DtsvScope is absent the scope is unbounded, which reproduces stock
++ * whole-program TSVD4J behavior (condition C1 in the scaling study).
++ */
++public final class TsvScope {
++
++    private static volatile Set<String> scopeClasses = null;
++    private static final AtomicInteger INSTRUMENTED = new AtomicInteger(0);
++    private static final AtomicInteger CONSIDERED = new AtomicInteger(0);
++
++    private TsvScope() {
++    }
++
++    /** Returns true when className falls inside the FlakeSync-localized region. */
++    public static boolean inScope(String className) {
++        CONSIDERED.incrementAndGet();
++        Set<String> scope = scopeClasses;
++        if (scope == null) {
++            synchronized (TsvScope.class) {
++                if (scopeClasses == null) {
++                    scopeClasses = load(System.getProperty("tsvScope"));
++                }
++                scope = scopeClasses;
++            }
++        }
++        boolean hit = scope.isEmpty() || scope.contains(className);
++        if (hit) {
++            INSTRUMENTED.incrementAndGet();
++        }
++        return hit;
++    }
++
++    public static int getScopeSize() {
++        Set<String> scope = scopeClasses;
++        return scope == null ? -1 : scope.size();
++    }
++
++    public static int getInstrumentedCount() {
++        return INSTRUMENTED.get();
++    }
++
++    public static int getConsideredCount() {
++        return CONSIDERED.get();
++    }
++
++    private static Set<String> load(String path) {
++        Set<String> result = new HashSet<>();
++        if (path == null) {
++            // Unbounded scope: whole-program TSVD4J.
++            return Collections.unmodifiableSet(result);
++        }
++        File file = new File(path);
++        if (!file.exists()) {
++            System.err.println("[tsvd4j] scope file not found, falling back to whole program: " + path);
++            return Collections.unmodifiableSet(result);
++        }
++        BufferedReader reader = null;
++        try {
++            reader = new BufferedReader(new FileReader(file));
++            String line = reader.readLine();
++            while (line != null) {
++                String cls = parseClassName(line);
++                if (cls != null) {
++                    result.add(cls);
++                }
++                line = reader.readLine();
++            }
++        } catch (Exception ex) {
++            ex.printStackTrace();
++        } finally {
++            if (reader != null) {
++                try {
++                    reader.close();
++                } catch (Exception ignored) {
++                    // Nothing useful to do here.
++                }
++            }
++        }
++        if (result.isEmpty()) {
++            System.err.println("[tsvd4j] scope file yielded no classes: " + path);
++        }
++        return Collections.unmodifiableSet(result);
++    }
++
++    /** Extracts a dotted class name from one line of any FlakeSync location file. */
++    static String parseClassName(String rawLine) {
++        if (rawLine == null) {
++            return null;
++        }
++        String line = rawLine.trim();
++        if (line.isEmpty() || line.startsWith("#")) {
++            return null;
++        }
++        // The first line of Locations.txt is the bare delay value.
++        if (line.matches("\\d+")) {
++            return null;
++        }
++        // CSV rows are "<test>,<location>"; the location is the last field.
++        if (line.contains(",")) {
++            line = line.substring(line.lastIndexOf(',') + 1);
++        }
++        // Trailing "[delay]" annotation on critical points.
++        int bracket = line.indexOf('[');
++        if (bracket >= 0) {
++            line = line.substring(0, bracket);
++        }
++        // Barrier rows may be "<startLoc>-<endLoc>"; take the class of the first.
++        int dash = line.indexOf('-');
++        if (dash > 0 && line.indexOf('#') > dash) {
++            line = line.substring(0, dash);
++        }
++        String cls = line.split("#")[0].replaceAll("[/]", ".").trim();
++        if (cls.isEmpty()) {
++            return null;
++        }
++        return cls;
++    }
++}
+diff --git a/flakesync-core/src/main/resources/blacklist.txt b/flakesync-core/src/main/resources/blacklist.txt
+index 62b39e8..b2cfb5e 100644
+--- a/flakesync-core/src/main/resources/blacklist.txt
++++ b/flakesync-core/src/main/resources/blacklist.txt
+@@ -189,4 +189,5 @@ org.apache.cassandra.db.RowPosition
+ edu.stanford.ppl.concurrent.EpochNode
+ com.datastax.driver.core.TypeCodec
+ edu.utexas.ece.flakesync.agent.Utility
+-org.hsqldb
+\ No newline at end of file
++org.hsqldb
++edu.utexas.ece.tsvd4j
+diff --git a/flakesync-maven-plugin/src/main/java/flakesync/SurefireExecution.java b/flakesync-maven-plugin/src/main/java/flakesync/SurefireExecution.java
+index df8fe03..17df992 100644
+--- a/flakesync-maven-plugin/src/main/java/flakesync/SurefireExecution.java
++++ b/flakesync-maven-plugin/src/main/java/flakesync/SurefireExecution.java
+@@ -441,6 +441,34 @@ public class SurefireExecution {
+             return execution;
+         }
+ 
++        public static SurefireExecution createTsvDetectionExec(Plugin surefire, String originalArgLine,
++                                                       MavenProject mavenProject, MavenSession mavenSession,
++                                                       BuildPluginManager pluginManager, String flakesyncDir,
++                                                       String localRepository, String testName, int delay,
++                                                       String scopeFile, String tsvKind, int runId,
++                                                       String delayLocations) {
++            SurefireExecution execution = new SurefireExecution(surefire, mavenProject, mavenSession, pluginManager,
++                    flakesyncDir, localRepository, delay);
++            execution.addTestName(testName);
++            execution.addDelay(delay + "");
++            execution.addMethodName("tsvRunId", String.valueOf(runId));
++            if (scopeFile != null && !scopeFile.isEmpty()) {
++                execution.addMethodName("tsvScope", scopeFile);
++            }
++            if ("field".equals(tsvKind) || "both".equals(tsvKind)) {
++                execution.addMethodName("field", "true");
++            }
++            if ("api".equals(tsvKind) || "both".equals(tsvKind)) {
++                execution.addMethodName("api", "true");
++            }
++            if (delayLocations != null && !delayLocations.isEmpty()) {
++                execution.addLocs(testName, delayLocations);
++            }
++            execution.setupArgline(PHASE.CRITICAL_POINT_SEARCH, originalArgLine);
++            execution.addAgentMode("TSV_DETECTION");
++            return execution;
++        }
++
+         public static SurefireExecution getDelayMethodExec(Plugin surefire, String originalArgLine,
+                                                         MavenProject mavenProject, MavenSession mavenSession,
+                                                         BuildPluginManager pluginManager, String flakesyncDir,
+diff --git a/flakesync-maven-plugin/src/main/java/flakesync/TsvDetectMojo.java b/flakesync-maven-plugin/src/main/java/flakesync/TsvDetectMojo.java
+new file mode 100644
+index 0000000..1eccfea
+--- /dev/null
++++ b/flakesync-maven-plugin/src/main/java/flakesync/TsvDetectMojo.java
+@@ -0,0 +1,159 @@
++/*
++The MIT License (MIT)
++Copyright (c) 2026 Ram Prosad Sarker
++
++Permission is hereby granted, free of charge, to any person obtaining
++a copy of this software and associated documentation files (the
++"Software"), to deal in the Software without restriction, including
++without limitation the rights to use, copy, modify, merge, publish,
++distribute, sublicense, and/or sell copies of the Software, and to
++permit persons to whom the Software is furnished to do so, subject to
++the following conditions:
++
++The above copyright notice and this permission notice shall be
++included in all copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
++EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
++NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
++LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
++OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
++WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
++*/
++
++package flakesync;
++
++import flakesync.common.Level;
++import flakesync.common.Logger;
++
++import org.apache.maven.plugin.MojoExecutionException;
++import org.apache.maven.plugin.MojoFailureException;
++import org.apache.maven.plugins.annotations.LifecyclePhase;
++import org.apache.maven.plugins.annotations.Mojo;
++import org.apache.maven.plugins.annotations.Parameter;
++import org.apache.maven.plugins.annotations.ResolutionScope;
++
++import java.io.BufferedWriter;
++import java.io.File;
++import java.io.FileWriter;
++import java.nio.file.Path;
++import java.nio.file.Paths;
++
++/**
++ * Runs TSVD4J's thread-safety-violation analysis, optionally restricted to the
++ * region FlakeSync localized for the given test.
++ *
++ * <p>Each run writes .flakesync/Results-TSV/&lt;test&gt;-TSV-run&lt;N&gt;.csv;
++ * this mojo additionally writes a manifest describing the configuration so that
++ * runs can be aggregated afterwards.
++ */
++@Mojo(name = "tsvdetect", defaultPhase = LifecyclePhase.TEST,
++        requiresDependencyResolution = ResolutionScope.TEST)
++public class TsvDetectMojo extends FlakeSyncAbstractMojo {
++
++    /** How many times to repeat the (randomized) TSVD4J run. */
++    @Parameter(property = "flakesync.tsvRuns", defaultValue = "10")
++    protected int tsvRuns;
++
++    /**
++     * Scope file. Defaults to the minimized locations for this test. Pass
++     * -Dflakesync.tsvScope=NONE to run whole-program TSVD4J (the C1 baseline).
++     */
++    @Parameter(property = "flakesync.tsvScope", defaultValue = "")
++    protected String tsvScope;
++
++    /** One of: field, api, both. */
++    @Parameter(property = "flakesync.tsvKind", defaultValue = "both")
++    protected String tsvKind;
++
++    /** Delay in ms handed to the agent; 0 means no FlakeSync delay injection. */
++    @Parameter(property = "flakesync.tsvDelay", defaultValue = "0")
++    protected int tsvDelay;
++
++    /**
++     * When set, delays are injected at these locations while TSV analysis runs
++     * (condition T1). Usually the minimized locations file.
++     */
++    @Parameter(property = "flakesync.tsvDelayLocs", defaultValue = "")
++    protected String tsvDelayLocs;
++
++    @Override
++    public void execute() throws MojoExecutionException, MojoFailureException {
++        super.execute();
++
++        String scopeFile = resolveScopeFile();
++        long suiteStart = System.currentTimeMillis();
++        int failures = 0;
++
++        Path manifest = Paths.get(this.baseDir.toString(), Constants.DEFAULT_FLAKESYNC_DIR,
++                "Results-TSV", this.testName.replace("#", ".") + "-manifest.csv");
++        manifest.getParent().toFile().mkdirs();
++
++        BufferedWriter mf = null;
++        try {
++            mf = new BufferedWriter(new FileWriter(manifest.toFile()));
++            mf.write("run,scope,kind,delay,delayLocs,wallClockMs,testOutcome");
++            mf.newLine();
++
++            for (int run = 0; run < this.tsvRuns; run++) {
++                long start = System.currentTimeMillis();
++                String outcome = "PASS";
++                try {
++                    SurefireExecution.SurefireFactory.createTsvDetectionExec(
++                            this.surefire, this.originalArgLine, this.mavenProject, this.mavenSession,
++                            this.pluginManager, Constants.DEFAULT_FLAKESYNC_DIR, this.localRepository,
++                            this.testName, this.tsvDelay, scopeFile, this.tsvKind, run,
++                            this.tsvDelayLocs).run();
++                } catch (Throwable tr) {
++                    // A failing test is a legitimate observation here, not an error.
++                    outcome = "FAIL";
++                    failures++;
++                    Logger.getGlobal().log(Level.INFO, "Run " + run + " ended with a test failure");
++                }
++                long elapsed = System.currentTimeMillis() - start;
++                mf.write(run + "," + (scopeFile == null ? "WHOLE_PROGRAM" : scopeFile) + ","
++                        + this.tsvKind + "," + this.tsvDelay + ","
++                        + (this.tsvDelayLocs == null || this.tsvDelayLocs.isEmpty() ? "none" : this.tsvDelayLocs)
++                        + "," + elapsed + "," + outcome);
++                mf.newLine();
++                mf.flush();
++                Logger.getGlobal().log(Level.INFO, "TSV run " + run + " finished in " + elapsed + " ms ("
++                        + outcome + ")");
++            }
++        } catch (Exception ex) {
++            throw new MojoExecutionException("Failed while running TSV detection", ex);
++        } finally {
++            if (mf != null) {
++                try {
++                    mf.close();
++                } catch (Exception ignored) {
++                    // Nothing useful to do here.
++                }
++            }
++        }
++
++        long total = System.currentTimeMillis() - suiteStart;
++        Logger.getGlobal().log(Level.INFO, "TSV detection: " + this.tsvRuns + " runs, "
++                + failures + " test failures, " + total + " ms total. Manifest: " + manifest);
++    }
++
++    /** Returns null for whole-program analysis, otherwise a path to a scope file. */
++    private String resolveScopeFile() throws MojoExecutionException {
++        if ("NONE".equalsIgnoreCase(this.tsvScope)) {
++            Logger.getGlobal().log(Level.INFO, "Running whole-program TSVD4J (no scope)");
++            return null;
++        }
++        String path = this.tsvScope;
++        if (path == null || path.isEmpty()) {
++            path = String.valueOf(Constants.getMinLocationsFilepath(this.testName));
++        }
++        File file = new File(path);
++        if (!file.exists()) {
++            throw new MojoExecutionException("Scope file does not exist: " + path
++                    + " -- run the deltadebug goal first, or pass -Dflakesync.tsvScope=NONE");
++        }
++        Logger.getGlobal().log(Level.INFO, "Scoping TSV analysis to " + path);
++        return file.getAbsolutePath();
++    }
++}
+diff --git a/integrate-tsvd4j.sh b/integrate-tsvd4j.sh
+new file mode 100755
+index 0000000..446c002
+--- /dev/null
++++ b/integrate-tsvd4j.sh
+@@ -0,0 +1,34 @@
++#!/usr/bin/env bash
++# Copies the TSVD4J analysis sources into flakesync-core so that the agent can
++# dispatch to them under agentmode=TSV_DETECTION.
++#
++# Usage: bash integrate-tsvd4j.sh /path/to/TSVD4J
++set -euo pipefail
++
++TSVD4J_HOME="${1:?usage: integrate-tsvd4j.sh /path/to/TSVD4J}"
++CORE_JAVA="flakesync-core/src/main/java/edu/utexas/ece"
++CORE_RES="flakesync-core/src/main/resources"
++
++if [ ! -d "$TSVD4J_HOME/tsvd4j-core" ]; then
++  echo "error: $TSVD4J_HOME does not look like a TSVD4J checkout" >&2
++  exit 1
++fi
++
++mkdir -p "$CORE_JAVA"
++cp -r "$TSVD4J_HOME/tsvd4j-core/src/main/java/edu/utexas/ece/tsvd4j" "$CORE_JAVA/"
++cp "$TSVD4J_HOME/tsvd4j-core/src/main/resources/API.txt" "$CORE_RES/"
++cp "$TSVD4J_HOME/tsvd4j-core/src/main/resources/allAPI.txt" "$CORE_RES/"
++
++# The TestListener depends on JUnit, which flakesync-core does not declare.
++# We collect results from the agent shutdown hook instead, so drop it.
++rm -rf "$CORE_JAVA/tsvd4j/listener"
++
++# Sanity check: the agent must never instrument its own analysis classes.
++if ! grep -q '^edu\.utexas\.ece\.tsvd4j$' "$CORE_RES/blacklist.txt"; then
++  echo "error: blacklist.txt is missing 'edu.utexas.ece.tsvd4j'" >&2
++  echo "       add it before building, or the Proxy will recurse into itself" >&2
++  exit 1
++fi
++
++echo "Copied TSVD4J sources into flakesync-core."
++find "$CORE_JAVA/tsvd4j" -name '*.java' | sort
+diff --git a/tools/aggregate_tsv.py b/tools/aggregate_tsv.py
+new file mode 100755
+index 0000000..d0610cb
+--- /dev/null
++++ b/tools/aggregate_tsv.py
+@@ -0,0 +1,154 @@
++#!/usr/bin/env python3
++"""Aggregate FlakeSync/TSVD4J runs into per-condition pair sets and set differences.
++
++Layout expected (one directory per condition):
++
++    results/<subject>/<condition>/Results-TSV/<test>-TSV-run<N>.csv
++    results/<subject>/<condition>/Results-TSV/<test>-manifest.csv
++
++Usage:
++    python3 tools/aggregate_tsv.py results/uniffle-grpc
++    python3 tools/aggregate_tsv.py results/uniffle-grpc --classify T1 T2
++"""
++
++import argparse
++import csv
++import pathlib
++import statistics
++import sys
++
++
++def read_pairs(path):
++    """Returns the set of conflicting pairs in one run file."""
++    pairs = set()
++    with open(path, newline="") as fh:
++        for line in fh:
++            line = line.strip()
++            if not line or line.startswith("#") or line.startswith("pointA"):
++                continue
++            pairs.add(line)
++    return pairs
++
++
++def read_meta(path):
++    """Returns the #key=value header lines of one run file."""
++    meta = {}
++    with open(path) as fh:
++        for line in fh:
++            if not line.startswith("#"):
++                break
++            if "=" in line:
++                key, _, value = line[1:].strip().partition("=")
++                meta[key] = value
++    return meta
++
++
++def load_condition(cond_dir):
++    tsv_dir = cond_dir / "Results-TSV"
++    if not tsv_dir.is_dir():
++        return None
++
++    runs = sorted(tsv_dir.glob("*-TSV-run*.csv"),
++                  key=lambda p: int(p.stem.rsplit("run", 1)[1]))
++    if not runs:
++        return None
++
++    per_run = [read_pairs(p) for p in runs]
++    union = set().union(*per_run) if per_run else set()
++    meta = read_meta(runs[0])
++
++    times, outcomes = [], []
++    manifests = list(tsv_dir.glob("*-manifest.csv"))
++    if manifests:
++        with open(manifests[0], newline="") as fh:
++            for row in csv.DictReader(fh):
++                times.append(int(row["wallClockMs"]))
++                outcomes.append(row["testOutcome"])
++
++    return {
++        "name": cond_dir.name,
++        "runs": len(per_run),
++        "per_run": per_run,
++        "union": union,
++        "scope_size": meta.get("scopeSize", "?"),
++        "instrumented": meta.get("classesInstrumented", "?"),
++        "considered": meta.get("classesConsidered", "?"),
++        "times": times,
++        "fail_rate": (outcomes.count("FAIL") / len(outcomes)) if outcomes else None,
++    }
++
++
++def saturation(per_run):
++    """Cumulative unique-pair count after each run -- checks whether N was enough."""
++    seen, curve = set(), []
++    for pairs in per_run:
++        seen |= pairs
++        curve.append(len(seen))
++    return curve
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("subject_dir", type=pathlib.Path)
++    ap.add_argument("--classify", nargs=2, metavar=("DELAYED", "PATCHED"),
++                    help="condition names to diff, e.g. --classify T1 T2")
++    args = ap.parse_args()
++
++    if not args.subject_dir.is_dir():
++        sys.exit(f"no such directory: {args.subject_dir}")
++
++    conditions = {}
++    for cond_dir in sorted(p for p in args.subject_dir.iterdir() if p.is_dir()):
++        loaded = load_condition(cond_dir)
++        if loaded:
++            conditions[loaded["name"]] = loaded
++
++    if not conditions:
++        sys.exit(f"no Results-TSV data found under {args.subject_dir}")
++
++    print(f"subject: {args.subject_dir.name}\n")
++    header = f"{'cond':<10}{'runs':>5}{'pairs':>7}{'scope':>7}{'instr':>7}" \
++             f"{'consid':>8}{'medMs':>9}{'fail%':>7}"
++    print(header)
++    print("-" * len(header))
++    for cond in conditions.values():
++        med = int(statistics.median(cond["times"])) if cond["times"] else -1
++        fail = f"{cond['fail_rate'] * 100:.0f}" if cond["fail_rate"] is not None else "-"
++        print(f"{cond['name']:<10}{cond['runs']:>5}{len(cond['union']):>7}"
++              f"{cond['scope_size']:>7}{cond['instrumented']:>7}"
++              f"{cond['considered']:>8}{med:>9}{fail:>7}")
++
++    print("\nsaturation (cumulative unique pairs per run)")
++    for cond in conditions.values():
++        print(f"  {cond['name']:<10}{saturation(cond['per_run'])}")
++
++    if args.classify:
++        delayed, patched = args.classify
++        missing = [c for c in (delayed, patched) if c not in conditions]
++        if missing:
++            sys.exit(f"missing condition(s): {', '.join(missing)}")
++        a = conditions[delayed]["union"]
++        b = conditions[patched]["union"]
++        eliminated, surviving = a - b, a & b
++
++        print(f"\nclassification: {delayed} vs {patched}")
++        print(f"  eliminated by patch ({delayed} \\ {patched}): {len(eliminated)}")
++        for pair in sorted(eliminated):
++            print(f"    - {pair}")
++        print(f"  surviving the patch ({delayed} & {patched}): {len(surviving)}")
++        for pair in sorted(surviving):
++            print(f"    ! {pair}")
++
++        if surviving and not eliminated:
++            verdict = "GENUINE_BUG (no pair removed by the barrier)"
++        elif eliminated and not surviving:
++            verdict = "REPAIRABLE (all pairs removed by the barrier)"
++        elif eliminated and surviving:
++            verdict = "MIXED (barrier removed some pairs, others persist)"
++        else:
++            verdict = "NO_SIGNAL (no pairs observed under delay)"
++        print(f"  verdict: {verdict}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tools/run_study.sh b/tools/run_study.sh
+new file mode 100755
+index 0000000..46be9c7
+--- /dev/null
++++ b/tools/run_study.sh
+@@ -0,0 +1,78 @@
++#!/usr/bin/env bash
++# Drives the TSV conditions for one test and files the results per condition.
++#
++# Usage:
++#   bash tools/run_study.sh <project_dir> <module> <Class#method> <subject_label> [runs]
++#
++# Assumes FlakeSync's concurrentfind / delaylocs / deltadebug / critsearch /
++# barrierpointsearch goals have already been run for this test.
++set -uo pipefail
++
++PROJ="${1:?project dir}"
++MODULE="${2:?module, e.g. common}"
++TEST="${3:?Class#method}"
++LABEL="${4:?subject label}"
++RUNS="${5:-10}"
++
++PLUGIN="edu.utexas.ece:flakesync-maven-plugin:1.0-SNAPSHOT"
++OUT_ROOT="$(pwd)/results/$LABEL"
++FS_DIR="$PROJ/.flakesync"
++TESTFILE="${TEST/#/.}"
++
++MIN_LOCS="$FS_DIR/${TESTFILE}-Locations_minimized.txt"
++METHODS="$FS_DIR/${TESTFILE}-ResultMethods.txt"
++
++stash() {   # stash <condition>
++  local cond="$1"
++  mkdir -p "$OUT_ROOT/$cond"
++  if [ -d "$FS_DIR/Results-TSV" ]; then
++    rm -rf "$OUT_ROOT/$cond/Results-TSV"
++    mv "$FS_DIR/Results-TSV" "$OUT_ROOT/$cond/Results-TSV"
++  else
++    echo "warn: no Results-TSV produced for $cond" >&2
++  fi
++}
++
++run() {     # run <condition> <extra mvn args...>
++  local cond="$1"; shift
++  echo "=== $LABEL / $cond ==="
++  rm -rf "$FS_DIR/Results-TSV"
++  ( cd "$PROJ" && mvn "$PLUGIN:tsvdetect" \
++      -Dflakesync.testName="$TEST" \
++      -Dflakesync.tsvRuns="$RUNS" \
++      -pl "$MODULE" "$@" ) || echo "warn: $cond exited non-zero" >&2
++  stash "$cond"
++}
++
++for required in "$MIN_LOCS"; do
++  [ -f "$required" ] || { echo "missing $required -- run deltadebug first" >&2; exit 1; }
++done
++
++# ---- RQ1: does the barrier repair eliminate the conflicting pair? -----------
++# T0: scoped, unpatched, no delay
++run T0 -Dflakesync.tsvScope="$MIN_LOCS"
++# T1: scoped, unpatched, FlakeSync delay injected at the localized locations
++run T1 -Dflakesync.tsvScope="$MIN_LOCS" \
++       -Dflakesync.tsvDelay=800 \
++       -Dflakesync.tsvDelayLocs="$MIN_LOCS"
++# T2: apply FlakeSync's patch, then re-run scoped with no delay
++echo ">>> apply the patches in $FS_DIR/patch now, then press enter"
++read -r _
++run T2 -Dflakesync.tsvScope="$MIN_LOCS"
++echo ">>> revert the patches now, then press enter"
++read -r _
++
++# ---- RQ2: what does scoping cost and save? ---------------------------------
++# C1: whole program
++run C1 -Dflakesync.tsvScope=NONE
++# C2: minimized locations (same as T0; copied for a self-contained table)
++run C2 -Dflakesync.tsvScope="$MIN_LOCS"
++# C3: coarse -- all concurrent methods
++if [ -f "$METHODS" ]; then
++  run C3 -Dflakesync.tsvScope="$METHODS"
++else
++  echo "skip C3: $METHODS not found" >&2
++fi
++
++echo
++python3 "$(dirname "$0")/aggregate_tsv.py" "$OUT_ROOT" --classify T1 T2

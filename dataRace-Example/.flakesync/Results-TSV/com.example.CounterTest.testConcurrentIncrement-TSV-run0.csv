@@ -1,0 +1,7 @@
+#run=0
+#scopeSize=1
+#classesInstrumented=1
+#classesConsidered=4
+pointA,pointB
+com/example/Counter|16,com/example/Counter|16
+com/example/Counter|add|25,com/example/Counter|add|25

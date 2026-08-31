@@ -1,0 +1,11 @@
+run,scope,kind,delay,delayLocs,wallClockMs,testOutcome
+0,/tmp/scope-union.txt,both,0,none,5691,PASS
+1,/tmp/scope-union.txt,both,0,none,4259,PASS
+2,/tmp/scope-union.txt,both,0,none,4526,PASS
+3,/tmp/scope-union.txt,both,0,none,4782,PASS
+4,/tmp/scope-union.txt,both,0,none,4478,PASS
+5,/tmp/scope-union.txt,both,0,none,4363,PASS
+6,/tmp/scope-union.txt,both,0,none,4320,PASS
+7,/tmp/scope-union.txt,both,0,none,4306,PASS
+8,/tmp/scope-union.txt,both,0,none,4204,PASS
+9,/tmp/scope-union.txt,both,0,none,4298,PASS

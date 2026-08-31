@@ -1,0 +1,2 @@
+run,scope,kind,delay,delayLocs,wallClockMs,testOutcome
+0,/tmp/scope.txt,both,0,none,56701,PASS

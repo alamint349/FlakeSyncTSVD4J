@@ -1,0 +1,7 @@
+#run=2
+#scopeSize=0
+#classesInstrumented=311
+#classesConsidered=311
+pointA,pointB
+io/reactivex/internal/schedulers/SchedulerPoolFactory$ScheduledTask|remove|162,io/reactivex/internal/schedulers/SchedulerPoolFactory|put|153
+io/reactivex/internal/schedulers/SchedulerPoolFactory$ScheduledTask|keySet|160,io/reactivex/internal/schedulers/SchedulerPoolFactory|put|153

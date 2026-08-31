@@ -1,7 +1,7 @@
 # Applying TSVD4J to FlakeSync-Localized Regions
 
 **Progress report**
-Md Al Amin — 30 August 2026
+by Md Al Amin — 30 August 2026
 
 ---
 

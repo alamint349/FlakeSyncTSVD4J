@@ -1,7 +1,7 @@
 # Applying TSVD4J to FlakeSync-Localized Regions
 
 **Progress report (revised)**
-Ram Prosad Sarker — 6 September 2026
+Md Al Amin — 6 September 2026
 
 ---
 
@@ -367,7 +367,7 @@ their intersection is small.
 
 ## 12. Artifacts
 
-Repository: `https://github.com/USERNAME/flakesync-tsvd4j` (branch
+Repository: `https://github.com/alamint349/FlakeSyncTSVD4J` (branch
 `tsvd4j-integration`).
 
 - Integration of TSVD4J as the `TSV_DETECTION` agent mode, with `TsvScope` and the
